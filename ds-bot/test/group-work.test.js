@@ -649,7 +649,7 @@ test('a late reply during a running round is logged at once, called in that roun
 })
 
 test('a member stopped during a running round is logged at once and not repeated', async (t) => {
-  const host = await start(t)
+  const host = await start(t, { goal: { title: 'g', objective: 'o', constraints: [], status: 'active', current: 0, stages: [{ title: 's', acceptance: 'a', tasks: [] }] } })
   const first = host.round('c1', host.say('@Writer @Tester 整理文档'))
   await settle(() => host.agentOf('gb').calls.length === 1)
   host.begin('gb')
@@ -816,7 +816,7 @@ test('a long post does not call a name that sits in code past the preview', asyn
 })
 
 test('a long @all past the preview calls every other member at once', async (t) => {
-  const host = await start(t, { admin: 'b' }, { attachments: fakeAttachments() })
+  const host = await start(t, { admin: 'b', ...{ goal: { title: 'g', objective: 'o', constraints: [], status: 'active', current: 0, stages: [{ title: 's', acceptance: 'a', tasks: [] }] } } }, { attachments: fakeAttachments() })
   const message = `${filler(LONG_HEAD)}@all 看一下${filler(MESSAGE_INLINE_MAX)}`
   await host.tool('post_to_group', { group: 'Ops', message }, 'a')
   const post = host.takePost()
@@ -858,7 +858,7 @@ test('a post between the preview and the file limit still calls who it names', a
 })
 
 test('a plain post between the preview and the file limit still calls the other members in turn', async (t) => {
-  const host = await start(t)
+  const host = await start(t, { goal: { title: 'g', objective: 'o', constraints: [], status: 'active', current: 0, stages: [{ title: 's', acceptance: 'a', tasks: [] }] } })
   const message = filler(1500)
   assert.ok(message.length > LONG_HEAD && message.length <= MESSAGE_INLINE_MAX)
   await host.tool('post_to_group', { group: 'Ops', message }, 'a')

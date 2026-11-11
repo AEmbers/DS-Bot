@@ -117,6 +117,7 @@ export function install(rt) {
   })
 
   let registration
+  let ownedRoutes = new Set()
   const supported = () => typeof ctx.llm?.registerAdapter === 'function'
   const usedRefs = () => [...new Set(Object.values(state.bots ?? {}).flatMap(bot => [bot.model, bot.appliedModel]).filter(Boolean))]
   // A route a Bot runs on stays registered when its CLI goes away: the turn then fails
@@ -124,25 +125,36 @@ export function install(rt) {
   const servedRoutes = () => [...new Set([...found.keys(), ...customRouteId(), ...usedRefs().map(ref => splitRef(ref)?.provider).filter(isLocalAgentRoute)])]
   function applyRoutes() {
     if (!supported()) return
-    const routes = servedRoutes()
+    // A route another provider already answers must not be registered here as well: two
+    // adapters on one id make the model picker show it twice and send some turns to the
+    // wrong one. Routes this adapter owns are excluded, or it would drop its own.
+    const taken = new Set((ctx.llm.listProviders?.() ?? []).map(p => p.id).filter(id => !ownedRoutes.has(id)))
+    const routes = servedRoutes().filter(route => !taken.has(route))
     // The initial registration needs at least one provider; an empty replace
     // is legal and keeps the adapter registered with zero routes.
-    if (registration === undefined) {
-      if (routes.length === 0) return
-      registration = ctx.llm.registerAdapter(routes, adapter)
-    } else registration.replace(routes)
+    try {
+      if (registration === undefined) {
+        if (routes.length === 0) return
+        registration = ctx.llm.registerAdapter(routes, adapter)
+      } else registration.replace(routes)
+      ownedRoutes = new Set(routes)
+    } catch (error) {
+      rt.warn?.('ds-bot: local-agents route registration failed: %s', error)
+    }
   }
   // Custom agents hold a route whether or not their command resolves yet; a
   // missing one fails at prompt time with a typed error.
   applyRoutes()
-  void scan()
+  void scan().catch(error => rt.warn?.('ds-bot: local-agents scan failed: %s', error))
   // Custom agents arrive with the state load; their routes register then too.
   void rt.load?.().then(() => applyRoutes()).catch(() => {})
   // The callback returns the disposer: running adapter.dispose() inside the
   // setup would leave the adapter disposed from the moment it installs.
   ctx.effect(() => () => {
     void adapter.dispose()
+    ownedRoutes.clear()
     registration?.()
+    registration = undefined
   }, 'ds-bot: local agents')
 
   // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@ import { copyFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { mkdir, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { LEGACY_THEMES, MAX_EXCHANGES, ROOM_MODES, SECTION_COLORS, SECTION_NAME_MAX, TEXT_KEPT } from './constants.js'
-import { replaceFile } from './files.js'
+import { replaceFile, writeFileDurable } from './files.js'
 import { homeLock } from './home-lock.js'
 import { currentColor, headOf, normalize, unquote } from './text.js'
 import { AMBIGUOUS_OLD_ROUTES, legacyRoute } from './local-agents/engines.js'
@@ -96,6 +96,18 @@ export function install(rt) {
       } catch (copyError) {
         stuck = copyError?.code ?? copyError?.message ?? error?.message ?? String(error)
         warn('ds-bot: unreadable state %s: %s; backup failed: %s', statePath, error, copyError)
+      }
+      // A reset mid-write leaves a whole file of NULs. Starting a fresh team there
+      // throws away every Bot and room; the last good copy is the team the user had.
+      try {
+        const good = JSON.parse(readFileSync(`${statePath}.good`, 'utf8'))
+        if (good?.version === 1) {
+          stuck = undefined
+          warn('ds-bot: recovered the Bot team from %s.good', statePath)
+          return good
+        }
+      } catch {
+        // No usable copy: fall through to a fresh team, as before.
       }
       return undefined
     }
@@ -406,9 +418,12 @@ export function install(rt) {
           }
         }
         ensureLock()
-        await writeFile(temp, snapshot, 'utf8')
+        await writeFileDurable(temp, snapshot)
         ensureLock()
         await replaceFile(temp, statePath, ensureLock)
+        // One good copy, always: a blue screen or a later bug can take the live file,
+        // and without this there is nothing to go back to.
+        await writeFileDurable(`${statePath}.good`, snapshot).catch(() => {})
         seen = stamp()
         rt.capabilitiesStateSaved?.()
         for (const listener of savedListeners) {

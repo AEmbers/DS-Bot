@@ -11,7 +11,8 @@
 // request itself is never sent again there.
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
+import { replaceFile, writeFileDurable } from './files.js'
 import { join } from 'node:path'
 import { HISTORY_TIMEOUT_MS, MESSAGE_INLINE_MAX, SOURCE_KIND, STEER_CUT } from './constants.js'
 import { answerSender, cutOffText, failureLine, turnFailure } from './turns.js'
@@ -135,13 +136,16 @@ export function install(rt) {
     // write the file once per change.
     if (due) return
     due = true
-    // Written in place: a rename over the file fails on Windows while anything reads
-    // it, and a torn write only loses what one restart would pick up.
+    // Flushed in place: a blue screen mid-write must not leave a file of NULs, and a
+    // rename over it can fail on Windows while anything reads it. Writing through a
+    // temporary file keeps the old notes until the new ones are durable.
     writing = writing.then(async () => {
       due = false
       const snapshot = latest
+      const temp = `${file}.${process.pid}.tmp`
       await mkdir(home, { recursive: true })
-      await writeFile(file, snapshot, 'utf8')
+      await writeFileDurable(temp, snapshot)
+      await replaceFile(temp, file)
     }).catch(error => rt.warn('ds-bot: noting running turns failed: %s', error))
   }
   const update = (id, change) => {

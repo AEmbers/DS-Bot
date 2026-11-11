@@ -326,6 +326,26 @@ export function reworkGoal(room, input, by, memberOf, memberNames, now = Date.no
   return { goal, reply: { event: 'rework', title: goal.title, stage: goal.current + 1, count: goal.stages.length, text: reason } }
 }
 
+// What a finished goal leaves behind that would otherwise keep the room going.
+//
+// `goalBlock` returns '' once the status is complete, so the members' next prompt contains
+// nothing that says the work is over — the one signal they were steering by simply vanishes.
+// On habit alone they keep relaying, every hop is held by the gate-2 budget, and
+// room.paused fills up with calls for a topic that no longer exists. The group then looks
+// busy while it has nothing to do, which is exactly the "never converges" shape.
+//
+// So the finished goal clears its own queue and counters here. The running turns are
+// stopped by the caller, which is the only place that has `rt`.
+function adjourn(room) {
+  delete room.paused
+  delete room.relaysSinceUser
+  delete room.relayLabel
+  delete room.relayNoticed
+  delete room.noGoalNoticed
+  delete room.idleRelays
+  delete room.idlePaused
+}
+
 export function completeGoal(room, input, by, now = Date.now()) {
   const goal = room.goal
   if (goal === undefined) return { error: noGoal(room) }
@@ -344,6 +364,7 @@ export function completeGoal(room, input, by, now = Date.now()) {
   goal.evidence = evidence
   goal.endedAt = now
   touchGoal(goal, { kind: 'complete', by }, now)
+  adjourn(room)
   return { goal, reply: { event: 'complete', title: goal.title, count: goal.stages.length, text: summary } }
 }
 
@@ -774,6 +795,12 @@ export function install(rt) {
         case 'complete':
           result = completeGoal(room, args, self)
           next = 'Complete. Tell the user what was delivered.'
+          // A finished goal is the group's stopping point, not a hand-off: the other members
+          // are stopped here so they do not relay into a room that has nothing left to do.
+          // This member keeps its turn to report the summary, the same way 'stop' does.
+          post = async () => {
+            for (const id of room.members.filter(other => other !== self)) await rt.stopMemberWork?.(room.id, id)
+          }
           break
         case 'pause':
           result = pauseGoal(room, self)

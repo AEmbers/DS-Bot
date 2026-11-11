@@ -84,6 +84,16 @@ export const ROOM_WORK_GRACE_MS = 15_000
 // Consecutive Bot-to-Bot relays with no tool call and only repetitive or ack text
 // before the round parks the remaining calls and asks the user before continuing.
 export const ROOM_IDLE_RELAY_LIMIT = 6
+// How many rounds one topic may run before the group parks further relays and says it
+// is closing. A round is not a message: it is one speaker adding a *new* claim to a
+// topic that is already under debate (see topicKeyOf in group-gates.js), so four
+// members restating the same finding is one round, not four.
+export const ROOM_TOPIC_TURN_LIMIT = 3
+// A room without a running goal does not fan a message out to every member: a plain
+// message in "everyone" mode wakes all of them, and without an objective there is
+// nothing for them to work toward, so the round only re-states itself. Set false to
+// restore the old behaviour (every plain message answered by everyone).
+export const ROOM_REQUIRE_GOAL_FOR_BROADCAST = true
 
 export const OWN_CHAT_LINE_MAX = 400
 // The message an anchor points at is shown whole (up to this), so a long draft takes

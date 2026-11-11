@@ -22,12 +22,13 @@ import { readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { GROUP_LINE_READ, LATE_ANSWER, ROOM_IDLE_RELAY_LIMIT, ROOM_REPLY_TIMEOUT_MS, ROOM_STEP_GAP_MS, ROOM_WORK_GRACE_MS, SOURCE_KIND, TEAM_TOOLS, TEXT_KEPT } from './constants.js'
+import { GROUP_LINE_READ, LATE_ANSWER, ROOM_IDLE_RELAY_LIMIT, ROOM_REPLY_TIMEOUT_MS, ROOM_STEP_GAP_MS, ROOM_TOPIC_TURN_LIMIT, ROOM_WORK_GRACE_MS, SOURCE_KIND, TEAM_TOOLS, TEXT_KEPT } from './constants.js'
 import { escapeRegExp, headOf, splitRef, textOf } from './text.js'
 import { viaOf } from '../shared/im-platforms.js'
 import { mentionSpans, speakerOf } from '../shared/mentions.js'
 import { GROUP_REF, output } from './tools.js'
 import { failureLine } from './turns.js'
+import { broadcasts, clearGateState, labelRelay, noGoalResponse, noGoalSpeakers, relayBudgetExhausted, relaysSpent, spendRelay } from './group-gates.js'
 
 const ROOM_LOG_MAX = 60
 const ROOM_FIRST_LOOK = 12
@@ -103,6 +104,8 @@ const goalNotice = (line) => {
 }
 const noticeText = (line) => {
   if (line.reason === 'missed') return `${(line.names ?? []).join(' and ')} did not answer within ${line.minutes} minutes, so this round moved on without it. If it is still working, it posts its result later as a late reply; if it is urgent, the user can write here or the admin can follow up.`
+  if (line.reason === 'no-goal') return `No goal: this group has no running goal, so a plain message is not fanned out to every member. Name the people you want with @Name, or have the admin write one with group_goal start (objective, and each stage's done when).`
+  if (line.reason === 'topic-closed') return `Paused: the members have relayed ${line.limit} times in a row without the user writing here, so further relays wait until they do. A conversation the user is not part of is bounded; when they write, it re-opens.`
   if (line.reason === 'paused' && line.idle && (line.names ?? []).length === 0) return `Paused: Bots here posted ${line.limit} status updates with no new work (no tool used, nobody called), the last from ${line.from ?? 'a member'}. The group answers no more of them until the user writes here; do not post again to start a round.`
   if (line.reason === 'paused' && line.idle) return `Paused: ${[line.from, ...(line.names ?? [])].filter(Boolean).join(' and ')} went back and forth ${line.limit} times without progress (no tool used, only thanks or repeats). The calls to @${(line.names ?? []).join(' and @')} wait until the user writes here; do not call them again.`
   if (line.reason === 'paused') return `Paused: Bots have called each other ${line.limit} times since the user last wrote here. The calls to @${(line.names ?? []).join(' and @')} wait until the user continues or writes here; do not call them again.`
@@ -697,6 +700,8 @@ export function install(rt) {
     const lines = waitingLines(agent).filter(line => agent.inbox.remove(line.id))
     if (lines.length === 0) return
     unpauseRoomIdle(room)
+    // A message from the user re-opens closed topics: they decide the debate may go on.
+    clearGateState(room)
     round.userMessage = true
     rt.goalUserMessage?.(room.id)
     const members = room.members.map(rt.botOf).filter(Boolean)
@@ -731,6 +736,50 @@ export function install(rt) {
   const unpauseRoomIdle = (room) => {
     if (room.idleRelays !== undefined) delete room.idleRelays
     if (room.idlePaused !== undefined) delete room.idlePaused
+  }
+
+  // ---- The two hard gates (rules in group-gates.js, effects here) -----------------
+  // Gate 1 stops a goalless room from fanning a plain message out to everyone; gate 2 stops
+  // one topic from being restated past its round budget. The judgements are pure functions
+  // in group-gates.js so they can be tested without a live round; this file only does what
+  // a rejection requires — park the calls, post the notice once.
+  //
+  // Says it once per room until the room has a goal, so a chatty round cannot repeat it.
+  //
+  // Touches only `room`, never `round`: its caller runs before `const round` is declared, so
+  // taking a round here would be a TDZ ReferenceError at exactly the moment the gate fires —
+  // the gate's main path would crash the round instead of posting a notice. It returns the
+  // reply for the caller to push once the round exists.
+  function refuseBroadcast(room) {
+    if (room.noGoalNoticed === true) return undefined
+    room.noGoalNoticed = true
+    appendRoom(room, { who: 'DS Bot', kind: 'notice', reason: 'no-goal' })
+    void rt.save().catch(() => {})
+    return { kind: 'notice', reason: 'no-goal', time: Date.now() }
+  }
+  // The relay chain at its limit holds the new call and says so once. The calls are parked
+  // in room.paused — the same list the idle pause uses — so nothing is dropped: they run
+  // after the user writes, which is also what re-opens the chain.
+  //
+  // The budget counts relays, not subjects (see group-gates.js): the failure this stops is
+  // every member writing a fresh, different, plausible sentence each round, so anything
+  // that measured the wording would measure the one thing the members change every time.
+  function holdRelayCalls(room, round, member, callees) {
+    if (callees.length > 0) {
+      const parked = room.paused ?? []
+      for (const peer of callees) {
+        if (parked.some(entry => entry.id === peer.id)) continue
+        parked.push({ id: peer.id, name: peer.name, note: `${member.name} posted in the group`, by: member.id, idle: true })
+      }
+      room.paused = parked
+    }
+    if (room.relayNoticed !== true) {
+      room.relayNoticed = true
+      appendRoom(room, { who: 'DS Bot', kind: 'notice', reason: 'topic-closed', limit: ROOM_TOPIC_TURN_LIMIT })
+      round.replies.push({ kind: 'notice', reason: 'topic-closed', limit: ROOM_TOPIC_TURN_LIMIT, time: Date.now() })
+      void rt.save().catch(() => {})
+    }
+    return true
   }
   // Whether an idle step must wait for the user: the room is paused, or this step reaches
   // the limit. Every call it would have made waits in `room.paused` and runs after the
@@ -791,6 +840,14 @@ export function install(rt) {
     }
     for (const peer of callees) called.add(peer.id)
     if (byBot && idleStep && holdIdleCalls(room, round, member, callees, { named, all })) return
+    // Gate 2. A bot-to-bot relay that calls somebody spends one unit of the chain's budget.
+    // Idle text is already metered by the guard above — counting it here too would close the
+    // chain over a status update, and a post that calls nobody moves no work at all.
+    if (byBot && !idleStep && callees.length > 0) {
+      labelRelay(room, text, headOf)
+      spendRelay(room)
+      if (relayBudgetExhausted(room) && holdRelayCalls(room, round, member, callees)) return
+    }
     if (callees.length === 0) return
     callIn(round, callees, `${member.name} mentioned you`, member.id)
     // An @Name from the admin hands the member its goal task.
@@ -1024,13 +1081,26 @@ export function install(rt) {
       const poster = opener.botId === undefined ? undefined : rt.botOf(opener.botId)
       const idlePost = poster !== undefined && !event(opener) && opener.quiet !== true && isIdleRelayText(opener.text ?? '', everyone, [])
       if (posts.some(userPost)) unpauseRoomIdle(room)
+      // The user writing here also re-opens every topic the round budget closed.
+      if (posts.some(userPost)) clearGateState(room)
       // The pause holds a status post back: it is not answered, and the members it named
       // wait for the user. A post with work in it goes ahead.
       const holdsPost = idlePost && room.idlePaused !== undefined
       const named = opener.botId === undefined ? [] : (mentionsOf(opener, everyone) ?? mentionsIn(opener.text ?? '', everyone)).found
       const opened = openingCall(room, opener)
-      const speakers = holdsPost ? [] : opened.speakers
-      const ordered = holdsPost ? false : opened.ordered
+      // Gate 1: a goalless room does not fan a plain message out to everyone. A targeted
+      // @Name call is untouched. What happens to the broadcast depends on who wrote it:
+      // a member's own post is refused outright (a group with no objective talking to
+      // itself is the failure this gate exists for), while the user's message is
+      // downgraded to the admin alone — refusing the person who owns the group would leave
+      // them writing into silence.
+      const goalless = !holdsPost && broadcasts(room, opener, opened.speakers, named.map(bot => bot.id))
+      const adminIds = everyone.filter(bot => rt.isAdminOf(room, bot.id)).map(bot => bot.id)
+      const downgraded = goalless && noGoalResponse(opener) === 'downgrade'
+      const refused = goalless && !downgraded
+      const speakers = holdsPost || refused ? [] : downgraded ? noGoalSpeakers(opened.speakers, adminIds) : opened.speakers
+      const ordered = holdsPost || refused ? false : opened.ordered
+      const noGoalReply = goalless ? refuseBroadcast(room) : undefined
       const calledByOpener = speakers.filter(member => named.includes(member))
       const openingBatchKey = opener.botId !== undefined && calledByOpener.length > 0 ? registerBatch(room.id, opener.botId, calledByOpener) : undefined
       // The admin's own post that opens a round hands goal tasks the same way a call does.
@@ -1074,6 +1144,8 @@ export function install(rt) {
         failed: [],
         started: [],
       }
+      // The gate-1 notice reaches the round here, after `round` exists.
+      if (noGoalReply !== undefined) round.replies.push(noGoalReply)
       // A status post of its own is not an idle step: what its members answer is. A post
       // with work in it clears the streak, and a paused room holds the post back.
       if (!idlePost && poster !== undefined && !event(opener) && opener.quiet !== true) clearIdleStreak(room)
@@ -1278,6 +1350,14 @@ export function install(rt) {
     const idlePost = !extra.done && extra.progress !== true && extra.late !== true && isIdleRelayText(text, everyone, [])
     if (!idlePost) clearIdleStreak(room)
     const opened = openingCall(room, post)
+    // Gate 1, the second entry: a member's post mid-round fans out the same way a post
+    // that opens one does. Same test, so "@all" and "everyone" cannot diverge.
+    if (broadcasts(room, post, opened.speakers, named.map(bot => bot.id))) {
+      // The round exists here, so its reply is pushed on the spot.
+      const noGoalReply = refuseBroadcast(room)
+      if (noGoalReply !== undefined) round.replies.push(noGoalReply)
+      return false
+    }
     if (idlePost && room.idlePaused !== undefined && holdIdleCalls(room, round, sender, opened.speakers, { named, all: (mentionsOf(post, everyone) ?? mentionsIn(text, everyone)).all === true })) return true
     const { speakers, ordered } = opened
     if (speakers.length === 0) return false
