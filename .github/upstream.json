@@ -1,0 +1,4 @@
+{
+  "upstream": "https://github.com/Fei2411/DS-Bot.git",
+  "note": "The one conflicting file is expected to be ds-bot/src/host/steer.js and ds-bot/src/host/delivery.js: our steer-cut mark is not upstream. Never take one side wholesale — dropping our side silently removes Bot-to-Bot interrupting again, dropping upstream's side loses its newer delivery fields."
+}

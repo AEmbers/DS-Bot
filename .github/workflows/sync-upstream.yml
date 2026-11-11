@@ -1,0 +1,115 @@
+name: sync-upstream
+
+# Merge the upstream DS-Bot monorepo into this fork once a day, and open an
+# issue when the merge cannot be done automatically.
+#
+# The files expected to conflict are ds-bot/src/host/steer.js and
+# ds-bot/src/host/delivery.js: our steer-cut mark (`source.steerCut`) is a fork
+# change that upstream does not have. Never resolve those by taking one side
+# wholesale —
+#   - taking upstream's side silently removes Bot-to-Bot interrupting again:
+#     `isCuttingSteer` falls back to `kind === 'user'` and Bot messages never cut;
+#   - taking ours loses whatever delivery fields upstream has added since.
+# Merge both: keep `isCuttingSteer` and the four call sites, and re-add any new
+# `source` fields upstream put in `delivery.js`.
+
+on:
+  schedule:
+    - cron: '0 20 * * *'   # 04:00 Asia/Shanghai
+  workflow_dispatch:
+    inputs:
+      upstream_branch:
+        description: Upstream branch to merge
+        required: false
+        default: main
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read upstream config
+        id: cfg
+        run: |
+          url=$(node -p "require('./.github/upstream.json').upstream")
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Configure identity and remotes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "${{ steps.cfg.outputs.url }}" || git remote set-url upstream "${{ steps.cfg.outputs.url }}"
+
+      - name: Fetch upstream
+        id: fetch
+        run: |
+          branch="${{ github.event.inputs.upstream_branch || 'main' }}"
+          git fetch upstream "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          behind=$(git rev-list --count "HEAD..upstream/$branch")
+          echo "behind=$behind" >> "$GITHUB_OUTPUT"
+
+      - name: Merge
+        id: merge
+        if: steps.fetch.outputs.behind != '0'
+        run: |
+          branch="${{ steps.fetch.outputs.branch }}"
+          if git merge --no-edit "upstream/$branch"; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+            git diff --name-only --diff-filter=U > /tmp/conflicts.txt || true
+            if [ ! -s /tmp/conflicts.txt ]; then
+              git diff --name-only "HEAD..upstream/$branch" > /tmp/conflicts.txt || true
+            fi
+          fi
+
+      - name: Push the merge
+        if: steps.merge.outputs.clean == 'true'
+        run: git push origin HEAD:main
+
+      - name: Open an issue when the merge conflicts
+        if: steps.fetch.outputs.behind != '0' && steps.merge.outputs.clean == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs')
+            const conflicts = fs.readFileSync('/tmp/conflicts.txt', 'utf8').trim() || '(could not list files)'
+            const title = `upstream sync needs a human (behind by ${{ steps.fetch.outputs.behind }})`
+            const body = [
+              `Merging \`upstream/${{ steps.fetch.outputs.branch }}\` conflicted.`,
+              '',
+              'Files involved:',
+              '```',
+              conflicts,
+              '```',
+              '',
+              'Resolve by hand. `ds-bot/src/host/steer.js` and `ds-bot/src/host/delivery.js` are',
+              '*expected* to conflict: the `source.steerCut` mark is ours and upstream does not',
+              'have it. Keep `isCuttingSteer` **and** the four call sites in `steer.js`, and keep',
+              'any new `source` fields upstream added in `delivery.js`. Taking either side',
+              'wholesale silently loses functionality — ours or upstream\'s.',
+              '',
+              'Then re-run `test/steer.test.js`: the three Bot-steer cases must stay green.',
+              '',
+              'See FORK.md and C:\Users\Administrator\.dsh\bot\workspace\dsbot-patches\v032-steer\README.md.',
+            ].join('\n')
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'upstream-sync',
+            })
+            if (existing.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['upstream-sync'],
+              })
+            }
