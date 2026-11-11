@@ -3,15 +3,21 @@ name: sync-upstream
 # Merge the upstream DS-Bot monorepo into this fork once a day, and open an
 # issue when the merge cannot be done automatically.
 #
-# The files expected to conflict are ds-bot/src/host/steer.js and
-# ds-bot/src/host/delivery.js: our steer-cut mark (`source.steerCut`) is a fork
-# change that upstream does not have. Never resolve those by taking one side
-# wholesale —
-#   - taking upstream's side silently removes Bot-to-Bot interrupting again:
-#     `isCuttingSteer` falls back to `kind === 'user'` and Bot messages never cut;
-#   - taking ours loses whatever delivery fields upstream has added since.
-# Merge both: keep `isCuttingSteer` and the four call sites, and re-add any new
-# `source` fields upstream put in `delivery.js`.
+# Files expected to conflict are listed in .github/upstream.json under
+# "expected_conflicts"; the Merge step reports which of them actually hit.
+# Each is a fork change upstream does not have, so never resolve one side
+# wholesale — that silently deletes the fork feature, or loses an upstream fix.
+#   steer.js, delivery.js        the steer-cut mark (source.steerCut). Taking
+#                                upstream silently removes Bot-to-Bot
+#                                interrupting: isCuttingSteer falls back to
+#                                kind === 'user' and Bot messages never cut.
+#                                Taking ours loses newer delivery fields.
+#   groups.js, group-gates.js    gate 1 (no broadcast without a goal) and
+#                                gate 2 (relay budget between user messages).
+#   goals.js                     adjourn on complete.
+#   constants.js                 ROOM_TOPIC_TURN_LIMIT, the gate switch.
+#   files.js, resume.js, store.js  durable writes (writeFileDurable, retry).
+# Merge both sides, then run `npm test` in ds-bot/.
 
 on:
   schedule:
@@ -72,6 +78,12 @@ jobs:
               git diff --name-only "HEAD..upstream/$branch" > /tmp/conflicts.txt || true
             fi
           fi
+          expected=$(node -p "(require('./.github/upstream.json').expected_conflicts||[]).join(' ')")
+          hit=""
+          for f in $expected; do
+            if grep -qx "$f" /tmp/conflicts.txt; then hit="$hit$f "; fi
+          done
+          if [ -n "$hit" ]; then echo "Expected fork conflicts hit: $hit"; fi
 
       - name: Push the merge
         if: steps.merge.outputs.clean == 'true'
@@ -93,15 +105,23 @@ jobs:
               conflicts,
               '```',
               '',
-              'Resolve by hand. `ds-bot/src/host/steer.js` and `ds-bot/src/host/delivery.js` are',
-              '*expected* to conflict: the `source.steerCut` mark is ours and upstream does not',
-              'have it. Keep `isCuttingSteer` **and** the four call sites in `steer.js`, and keep',
-              'any new `source` fields upstream added in `delivery.js`. Taking either side',
-              'wholesale silently loses functionality — ours or upstream\'s.',
+              'Resolve by hand, keeping both sides. Every file below is a fork change',
+              'upstream does not have, so taking upstream side for a whole file silently',
+              'deletes it:',
               '',
-              'Then re-run `test/steer.test.js`: the three Bot-steer cases must stay green.',
+              '| File | What must survive |',
+              '| --- | --- |',
+              '| `steer.js`, `delivery.js` | `isCuttingSteer` and its four call sites, plus any new `source` field upstream added |',
+              '| `groups.js`, `group-gates.js` | gate 1 (no broadcast without a goal) and gate 2 (relay budget) |',
+              '| `goals.js` | `adjourn(room)` when a goal reaches complete |',
+              '| `constants.js` | `ROOM_TOPIC_TURN_LIMIT`, `ROOM_REQUIRE_GOAL_FOR_BROADCAST` |',
+              '| `files.js`, `resume.js`, `store.js` | `writeFileDurable` / `replaceFile` retry |',
               '',
-              'See FORK.md and C:\Users\Administrator\.dsh\bot\workspace\dsbot-patches\v032-steer\README.md.',
+              'Then run `npm test` in `ds-bot/`. The baseline on a clean checkout here reads',
+              '23 pass / 5 fail in `group-goal` and 79 pass / 1 fail in `group-work`; those',
+              'failures pre-exist in this environment. Anything beyond them is this merge.',
+              '',
+              'See FORK.md and the patch bank under dsbot-patches/.',
             ].join('\n')
             const existing = await github.rest.issues.listForRepo({
               owner: context.repo.owner, repo: context.repo.repo,
