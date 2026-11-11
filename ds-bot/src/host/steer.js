@@ -25,6 +25,43 @@ export function install(rt) {
   const privateOf = (sessionId) => sessionId !== undefined && rt.chatOwners.has(sessionId) && !rt.groupOwners.has(sessionId)
   const liveAgent = (sessionId) => ctx.get('agents')?.get(sessionId)
 
+  /* 哪种 `next-step` 消息算「插话」，值得切断正在跑的模型调用。
+   *
+   * ## 以前只认用户（`source.kind === 'user'`），这是个能力缺口
+   *
+   * Bot 之间发的消息 `source.kind` 是 `'bot'`（`constants.js:41`），
+   * 所以下面三条判定全部对 Bot 消息返回 false：
+   *   - `isUserSteer`（这个函数）—— 不唤醒 steerWaiters、不 scheduleCut
+   *   - `maybeCut` 里 `nextStep.reverse().find(kind === 'user')` —— 找不到「最后一条」
+   *   - `step/start` 里的同类检查 —— 不补切
+   *
+   * 结果：即使消息以 `next-step` 投递（`agent.steer`），也不会切断
+   * 正在跑的模型调用，而是**等这一步的模型调用自然返回**才被读到。
+   * 长一点的工具调用（编译、跑测试、全量回归）就是几分钟到十几分钟，
+   * 表现出来就是「消息越排越多、做不到实时交流」。
+   *
+   * ## 为什么 Bot 消息也该切
+   *
+   * `message_bot({when:'now'})` 的语义就是「在它下一个 step 读，能中途改道」。
+   * 用户把它理解成「插入、马上收到」是对的 —— 提示词原文：
+   * 「a working Bot reads your message at its next step, between its current
+   * actions, and answers once its current work is done」。
+   *
+   * 代价确认：切断 = `agent.cancel()` = 当前那次模型调用的 token 白花。
+   * 所以**只切真正的插话**：源消息必须明确带了 `steer` 意图才切。
+   * 普通 `followup`（`when:'queue'`）走 `next-turn`，根本不进这个函数。
+   *
+   * 判定依据放在 `source.steerCut` 上，由 `delivery.js` 在投递时写上 ——
+   * 不猜、不从 kind 反推。用户消息（kind='user'）本来就是要切的，
+   * 保持原行为不变。
+   */
+  const isCuttingSteer = (message) => {
+    const source = message?.source
+    if (source === undefined || source === null) return false
+    if (source.kind === 'user') return true
+    return source.steerCut === true
+  }
+
   // Per-session state kept by the session/event listener below.
   const state = new Map()
   const stateOf = (id) => {
@@ -33,7 +70,7 @@ export function install(rt) {
     return entry
   }
   const isUserSteer = (event) => event?.data?.target === 'next-step'
-    && (event.data.inserted ?? []).some(message => message?.source?.kind === 'user')
+    && (event.data.inserted ?? []).some(message => isCuttingSteer(message))
   const wake = (set, value) => { const waiters = [...set]; set.clear(); for (const fn of waiters) fn(value) }
 
   // A user steer into a private chat must cut a running model call. The check runs
@@ -47,7 +84,7 @@ export function install(rt) {
     if (track.phase !== 'model' || track.cutting) return
     if (entry.turn === undefined || (entry.calls?.size ?? 0) > 0 || agent.status !== 'running') return
     const nextStep = agent.inbox?.nextStep ?? []
-    const last = [...nextStep].reverse().find(message => message?.source?.kind === 'user')
+    const last = [...nextStep].reverse().find(message => isCuttingSteer(message))
     if (last === undefined) return
     track.cutting = true
     rt.markSteerCut(id)
@@ -150,7 +187,7 @@ export function install(rt) {
           // short grace for a fast command, then for the job id the native call
           // registers (it may not exist yet while approval is pending).
           const steerSeen = () => {
-            if ((exec.agent.inbox?.nextStep ?? []).some(message => message?.source?.kind === 'user')) return Promise.resolve('steered')
+            if ((exec.agent.inbox?.nextStep ?? []).some(message => isCuttingSteer(message))) return Promise.resolve('steered')
             return new Promise(resolve => { steerResolve = resolve; track.steerWaiters.add(resolve) }).then(() => 'steered')
           }
           const first = await Promise.race([native, steerSeen()])
@@ -221,7 +258,7 @@ export function install(rt) {
       case 'step/start': {
         track.phase = 'model'
         const agent = liveAgent(id)
-        if ((agent?.inbox?.nextStep ?? []).some(message => message?.source?.kind === 'user')) scheduleCut(id)
+        if ((agent?.inbox?.nextStep ?? []).some(message => isCuttingSteer(message))) scheduleCut(id)
         break
       }
       case 'assistant/message':

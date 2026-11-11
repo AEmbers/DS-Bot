@@ -540,7 +540,21 @@ export function install(rt) {
           const text = String(body.text ?? '').trim()
           if (text === '' || typeof body.sessionId !== 'string') return fail('Nothing to send', 'bot/invalid')
           await rt.load()
-          await rt.sendUser({ sessionId: body.sessionId, content: [{ type: 'text', text }] })
+          await rt.sendUser({
+            sessionId: body.sessionId,
+            content: [{ type: 'text', text }],
+            // 与 DSH 自己的 `SessionPromptRequest.mode` 对齐：`'queue' | 'steer'`。
+            //
+            // 这里以前是**写死 queue** 的（`sendUser` 内部 `mode: 'queue'`），
+            // 所以界面上那个「排队 / 插入」开关对 Bot 完全无效 —— 无论选哪个，
+            // 消息都排到下一轮，Bot 正在跑的 turn 不会被打断。
+            //
+            // 只认严格的 `'steer'`：其它任何值（含缺省、拼错、大小写不对）
+            // 都退回 `'queue'`。理由：steer 会**取消正在跑的模型调用**，
+            // 代价是一次已付出的 token 白花；把「传错」默认成 steer 会让
+            // 每个笔误都变成一次浪费。宁可少插一句，也不要错插十句。
+            mode: body.mode === 'steer' ? 'steer' : 'queue',
+          })
           return ok(true)
         }
         case 'btw-delete': {
@@ -708,7 +722,7 @@ export function install(rt) {
   // How a user message reaches a Session: a Bot id, a group chat's id, or an earlier
   // part of either resolves to its current part. `content` is the prompt blocks DSH
   // takes (text, image, file receipts); `requestId` lands on the message's source.
-  async function sendUser({ sessionId: ref, content, requestId = randomUUID() }) {
+  async function sendUser({ sessionId: ref, content, requestId = randomUUID(), mode = 'queue' }) {
     const past = rt.pastOwners.get(ref)
     const room = rt.roomOf(ref)
     const sessionId = rt.botOf(ref) ? rt.chatOf(ref)
@@ -719,7 +733,16 @@ export function install(rt) {
     await ctx.sessionController.prompt({
       requestId,
       sessionId,
-      mode: 'queue',
+      // DSH 的 `SessionPromptRequest.mode` 只有 `'queue' | 'steer'` 两个值
+      // （`dsh-api-session-controller/lib/types/sessions/session.js:153`：
+      //   `const placement = this.running ? input.mode === 'steer' ? 'steering' : 'queued' : 'transcript'`）。
+      //
+      // `steer` 走 `agent.steer(message)` → `inbox` 的 `next-step`，
+      // `queue` 走 `agent.followup(message)` → `next-turn`。
+      // 差别就是「打断当前 turn 立刻读」还是「等这轮跑完再读」。
+      //
+      // 这里原来**写死 `'queue'`**，是「Bot 之间无法实时交流」的第一层原因。
+      mode: mode === 'steer' ? 'steer' : 'queue',
       content,
     }, AbortSignal.timeout(30_000))
   }

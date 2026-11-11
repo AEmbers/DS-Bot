@@ -506,3 +506,66 @@ test('steer resume: turnOf follows a steer cut to its continuation', async () =>
   ], 'x1')
   assert.deepEqual(stopped?.reason, { kind: 'aborted', reason: { kind: 'user' } })
 })
+
+/* ── Bot 消息的切断判定（本次修复） ────────────────────────────────────
+ *
+ * 背景：`message_bot({when:'now'})` 一直传的是 steer=true，`delivery.js` 也确实
+ * 调了 `agent.steer(message)` → 落到 `next-step`。但切断判定四处写死
+ * `source.kind === 'user'`，而 Bot 消息的 kind 是 `'bot'`，于是**永远不切**，
+ * 只能等当时那次模型调用自然返回。长工具调用（编译、全量回归）就是几十秒到
+ * 十几分钟，表现出来就是「消息越排越多、做不到实时交流」。
+ *
+ * 现在判定改成 `isCuttingSteer`：用户消息照旧切，Bot 消息看显式标记
+ * `source.steerCut === true`（由 delivery.js 在 steer 投递时写上）。
+ */
+const botMessage = (text, { steerCut = false } = {}) => ({
+  id: `m-${text}`,
+  content: [{ type: 'text', text }],
+  source: { kind: SOURCE_KIND, role: 'request', senderSessionId: 'bot-b', exchangeId: `x-${text}`, senderName: 'Writer', ...(steerCut ? { steerCut: true } : {}) },
+  role: 'user',
+})
+
+test('steer cut: a Bot steer that asks to cut cancels the running model call', async () => {
+  const { emit, stop, agent, calls } = await start()
+  const dm = 'dm-a'
+  await emit(dm, 'turn/start', { turn: 1 })
+  await emit(dm, 'step/start', { turn: 1, step: 1 })
+  const steer = botMessage('停下来看这条', { steerCut: true })
+  agent.inbox.nextStep.push(steer)
+  await emit(dm, 'agent/inbox/spliced', { target: 'next-step', inserted: [steer] })
+  const cancel = calls.find(c => c[0] === 'cancel')
+  assert.deepEqual(cancel?.[1], { kind: 'hook', reason: STEER_CUT })
+  assert.deepEqual(cancel?.[2], { keepInbox: true })
+  assert.deepEqual(agent.inbox.nextTurn.map(m => m.id), [steer.id])
+  await stop()
+})
+
+test('steer cut: a Bot steer without the mark is read next step, never cancels', async () => {
+  const { emit, stop, agent, calls } = await start()
+  const dm = 'dm-a'
+  await emit(dm, 'turn/start', { turn: 1 })
+  await emit(dm, 'step/start', { turn: 1, step: 1 })
+  // 普通 followup 姿态的 Bot 消息：进 next-step 但不带 steerCut。
+  // 它必须**不切断** —— 每次 Bot 消息都取消模型调用等于每次白花一笔 token。
+  const plain = botMessage('顺带说一句')
+  agent.inbox.nextStep.push(plain)
+  await emit(dm, 'agent/inbox/spliced', { target: 'next-step', inserted: [plain] })
+  assert.equal(calls.find(c => c[0] === 'cancel'), undefined)
+  // 消息仍在 next-step 里等着被读，没被丢掉。
+  assert.deepEqual(agent.inbox.nextStep.map(m => m.id), [plain.id])
+  await stop()
+})
+
+test('steer cut: a Bot steer in the tools phase waits, same as a user steer', async () => {
+  const { emit, stop, agent, calls } = await start()
+  const dm = 'dm-a'
+  await emit(dm, 'turn/start', { turn: 1 })
+  await emit(dm, 'step/start', { turn: 1, step: 1 })
+  await emit(dm, 'assistant/message', { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'tool-call' }] } })
+  const steer = botMessage('改个方向', { steerCut: true })
+  agent.inbox.nextStep.push(steer)
+  await emit(dm, 'agent/inbox/spliced', { target: 'next-step', inserted: [steer] })
+  // 工具阶段不切（切了会留下跑了一半的工具），这条门禁对 Bot 消息同样有效。
+  assert.equal(calls.find(c => c[0] === 'cancel'), undefined)
+  await stop()
+})

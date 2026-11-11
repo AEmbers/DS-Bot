@@ -82,6 +82,17 @@ export function install(rt) {
       ...(askedBy ? { askedBy } : {}),
       ...(fromRoomId ? { senderRoomId: fromRoomId } : {}),
       ...(abandoned ? { abandoned: true } : {}),
+      // 这条消息是否要**切断**收件方正在跑的模型调用。
+      //
+      // 只有 steer 投递才写这个字段，且只在它是 Bot 消息时才有意义
+      // （用户消息 `kind === 'user'` 本来就切，见 steer.js 的 isCuttingSteer）。
+      //
+      // 为什么要在 source 上带一个显式标记，而不是在 steer.js 里猜：
+      // `next-step` 这个投递目标只说明「下一个 step 读」，它**不区分**
+      // 「打断当前模型调用」还是「等这一步结束」。用户消息可以靠 kind 认出来，
+      // Bot 消息不行（kind 一律是 'bot'）。少一个显式标记，就只能靠
+      // 「Bot 消息一律不切」这个保守假设，实时交流永远做不到。
+      ...(steer && role === 'request' ? { steerCut: true } : {}),
     }
     const targetSessionId = sessionId ?? rt.chatOf(toId)
     await rt.ensureCapabilities(targetSessionId)
