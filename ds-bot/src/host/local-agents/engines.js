@@ -24,6 +24,15 @@ const CLIS = {
   'cline': { name: 'Cline', kind: 'acp', command: 'cline', args: ['--acp'], version: ['--version'], env: { CLINE_SESSION_BACKEND_MODE: 'local' } },
   'qwen-code': { name: 'Qwen Code', kind: 'acp', command: 'qwen', args: ['--acp'], version: ['--version'], signedIn: { file: ['.qwen', 'oauth_creds.json'] } },
   'goose': { name: 'Goose', kind: 'acp', command: 'goose', args: ['acp'], version: ['--version'] },
+  // `agy acp` is a standard ACP stdio server (protocolVersion 1, session/new,
+  // session/prompt, loadSession/resume/close/list). No signedIn check: the CLI has
+  // no auth subcommand — it keeps its OAuth token in the Windows credential store
+  // ("gemini:antigravity"), which probeSignIn cannot read, and its ACP initialize
+  // lists authMethods without saying which one is active. A null sign-in shows as
+  // unknown in the list, the same as Goose. Its ACP modes are default, accept-edits,
+  // auto and plan: `plan` maps to read-only and `accept-edits` to workspace-write,
+  // but nothing maps to danger-full-access, so there the agent keeps its own mode.
+  'antigravity-cli': { name: 'Antigravity', kind: 'acp', command: 'agy', args: ['acp'], version: ['--version'] },
 }
 
 // route -> engine, e.g. 'local-codex-cli'. `id` is the CLI's name without the prefix.
