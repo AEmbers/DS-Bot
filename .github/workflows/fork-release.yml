@@ -1,0 +1,140 @@
+name: fork-release
+
+# Pack ds-bot/ from this fork and attach the tarball to a GitHub release, so a
+# profile can install exactly this fork with an ordinary https tarball URL:
+#
+#   "ds-bot": "https://github.com/AEmbers/DS-Bot/releases/download/fork-v0.3.2.1/ds-bot-0.3.2.tgz"
+#
+# Why not npm: the package name `ds-bot` belongs to upstream and this fork must
+# not take it over. Why not github:AEmbers/DS-Bot#tag: the repo root is a
+# monorepo with no package.json, and only ds-bot/ is the package.
+#
+# Tag format: fork-v<version in ds-bot/package.json>[.<n>]
+#   fork-v0.3.2.1   first fork build of upstream 0.3.2
+#   fork-v0.3.2.2   second fork build, still on 0.3.2
+# The version inside the package stays 0.3.2 so upstream version checks keep
+# working; only the tag carries the fork build number.
+
+on:
+  push:
+    tags:
+      - 'fork-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build, e.g. fork-v0.3.2.1
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pack:
+    name: Pack and release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Resolve the tag and check the version
+        id: v
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # fork-v0.3.2.1 -> 0.3.2.1 ; fork-v0.3.2 -> 0.3.2
+          want="${tag#fork-v}"
+          version="$(node -p "require('./ds-bot/package.json').version")"
+          if [ "$want" != "$version" ] && [ "${want%.*}" != "$version" ]; then
+            echo "::error::Tag $tag does not match ds-bot/package.json version $version."
+            echo "::error::Use fork-v$version or fork-v$version.<build>."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Pack
+        working-directory: ds-bot
+        run: |
+          npm pack --ignore-scripts
+          ls -la ./*.tgz
+
+      - name: Check the package contents
+        working-directory: ds-bot
+        run: |
+          set -e
+          tgz="$(ls -1 ./*.tgz | head -1)"
+          echo "Packed: $tgz ($(stat -c%s "$tgz") bytes)"
+          list="$(tar -tzf "$tgz")"
+          # Every fork change must be inside the published package, or installing
+          # it silently drops the feature the fork exists for.
+          for f in \
+            package/src/host/group-gates.js \
+            package/src/host/groups.js \
+            package/src/host/goals.js \
+            package/src/host/constants.js \
+            package/src/host/files.js \
+            package/src/host/resume.js \
+            package/src/host/store.js \
+            package/src/host/steer.js \
+            package/src/host/delivery.js \
+            package/src/host/local-agents/index.js \
+            package/client.js \
+            package/index.js
+          do
+            if ! printf '%s\n' "$list" | grep -qx "$f"; then
+              echo "::error::$f is missing from $tgz."
+              exit 1
+            fi
+          done
+          echo "All fork files present."
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.v.outputs.tag }}
+          VERSION: ${{ steps.v.outputs.version }}
+        working-directory: ds-bot
+        run: |
+          tgz="$(ls -1 ./*.tgz | head -1)"
+          note="Fork build of ds-bot $VERSION from $(git rev-parse --short HEAD).
+
+          Install with:
+          \`\`\`
+          \"ds-bot\": \"https://github.com/${{ github.repository }}/releases/download/$TAG/$tgz\"
+          \`\`\`
+
+          This build carries the fork features: durable writes, the two group gates,
+          adjourn-on-complete, and steer-cut. It is the same code as \`main\` at the
+          commit above, only packaged."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$tgz" --clobber
+          else
+            gh release create "$TAG" "$tgz" \
+              --title "fork $VERSION ($TAG)" \
+              --notes "$note" \
+              --prerelease
+          fi
+
+      - name: Show the download URL
+        env:
+          TAG: ${{ steps.v.outputs.tag }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          echo "### ds-bot $VERSION" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "https://github.com/${{ github.repository }}/releases/download/$TAG/ds-bot-$VERSION.tgz" >> "$GITHUB_STEP_SUMMARY"
