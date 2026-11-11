@@ -125,7 +125,10 @@ export function teamActions({ call, after, partFor, roster, ui, live, cards, hel
     setPrefs: prefs => after(call('set-prefs', prefs)),
     setMain: (id, main = true, options = {}) => after(call('set-main', { id, main, ...options })),
     updateRoom: (id, patch) => after(call('update-room', { id, ...patch })),
-    send: (sessionId, text) => after(call('send', { sessionId: partFor(sessionId), text })),
+    // `mode` travels only when it is the strict `'steer'`: the host treats anything
+    // else as the queued default, so passing `'queue'` or `undefined` through would be
+    // a second normalization on this side of the wire (see send-mode.js).
+    send: (sessionId, text, mode) => after(call('send', { sessionId: partFor(sessionId), text, ...(mode === 'steer' ? { mode: 'steer' } : {}) })),
     answerQuestion: (sessionId, questionId, answer) => after(call('answer-question', { sessionId: partFor(sessionId), questionId, answer })),
     dismissQuestion: sessionId => after(call('dismiss-question', { sessionId })),
     answerView: (sessionId, viewId, action, values) => after(call('view-reply', { sessionId: partFor(sessionId), viewId, action, values })),

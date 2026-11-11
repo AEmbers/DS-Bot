@@ -686,6 +686,8 @@ var ZH = {
   "Text width": "正文宽度",
   "Show thinking": "显示思考过程",
   "Enter sends message": "回车发送消息",
+  "Steer while a Bot is busy (cuts its current step)": "Bot 忙碌时插话发送（会打断它当前这一步）",
+  "Off, a message sent meanwhile waits for the next turn.": "关闭时，这期间发出的消息等下一轮再读",
   "Bring up related memory": "自动带上相关记忆",
   "Group memory size": "群记忆容量",
   "Bot memory size": "Bot 记忆容量",
@@ -2188,7 +2190,10 @@ function teamActions({ call: call2, after, partFor, roster, ui: ui2, live, cards
     setPrefs: (prefs) => after(call2("set-prefs", prefs)),
     setMain: (id, main = true, options = {}) => after(call2("set-main", { id, main, ...options })),
     updateRoom: (id, patch) => after(call2("update-room", { id, ...patch })),
-    send: (sessionId, text) => after(call2("send", { sessionId: partFor(sessionId), text })),
+    // `mode` travels only when it is the strict `'steer'`: the host treats anything
+    // else as the queued default, so passing `'queue'` or `undefined` through would be
+    // a second normalization on this side of the wire (see send-mode.js).
+    send: (sessionId, text, mode) => after(call2("send", { sessionId: partFor(sessionId), text, ...mode === "steer" ? { mode: "steer" } : {} })),
     answerQuestion: (sessionId, questionId, answer) => after(call2("answer-question", { sessionId: partFor(sessionId), questionId, answer })),
     dismissQuestion: (sessionId) => after(call2("dismiss-question", { sessionId })),
     answerView: (sessionId, viewId, action, values) => after(call2("view-reply", { sessionId: partFor(sessionId), viewId, action, values })),
@@ -21802,6 +21807,13 @@ function GeneralPage({ roster, actions, run: run2, dsh }) {
         SetRow,
         { label: t("Enter sends message") },
         (0, import_react47.createElement)(Switch, { label: t("Enter sends message"), on: prefs.enterToSend !== false, onChange: (enterToSend) => run2(actions.setPrefs({ enterToSend })) })
+      ),
+      // Steer cuts the model call a Bot is running, so the cost is on the label: a
+      // user who reads it as plain queueing loses a turn of tokens every time.
+      (0, import_react47.createElement)(
+        SetRow,
+        { label: t("Steer while a Bot is busy (cuts its current step)"), hint: t("Off, a message sent meanwhile waits for the next turn.") },
+        (0, import_react47.createElement)(Switch, { label: t("Steer while a Bot is busy (cuts its current step)"), on: prefs.steerWhileBusy === true, onChange: (steerWhileBusy) => run2(actions.setPrefs({ steerWhileBusy })) })
       )
     ),
     (0, import_react47.createElement)(
@@ -24368,6 +24380,9 @@ ${shown}`, { axis: "y", ...QUICK_EDGES });
   );
 }
 
+// src/client/send-mode.js
+var sendMode = (prefs) => prefs?.steerWhileBusy === true ? "steer" : void 0;
+
 // src/client/new-chat.js
 var import_react54 = require("react");
 function NewChat({ mode, sectionId = null, paneLeft, roster, actions }) {
@@ -24424,7 +24439,7 @@ function NewChat({ mode, sectionId = null, paneLeft, roster, actions }) {
     if (bot.hidden || sectionId && bot.sectionId !== sectionId) {
       await actions.setFlags(bot.id, { ...bot.hidden ? { hidden: false } : {}, ...sectionId ? { sectionId } : {} });
     }
-    if (message.trim()) await actions.send(bot.id, message.trim());
+    if (message.trim()) await actions.send(bot.id, message.trim(), sendMode(roster.prefs));
     actions.openSession(bot.id);
     close();
   });
@@ -24442,7 +24457,7 @@ function NewChat({ mode, sectionId = null, paneLeft, roster, actions }) {
     if (admin === null || picked.length === 0) return;
     const text = message.trim();
     const room2 = await actions.createRoom([admin, ...picked], { admin, ...sectionId ? { sectionId } : {}, ...text ? {} : { greet: true } });
-    if (text) await actions.send(room2.id, text);
+    if (text) await actions.send(room2.id, text, sendMode(roster.prefs));
     actions.openSession(room2.id);
     close();
   };
@@ -24456,13 +24471,13 @@ function NewChat({ mode, sectionId = null, paneLeft, roster, actions }) {
     if (text === "" || picked.length === 0) return;
     if (picked.length === 1) {
       if (sectionId) await actions.setFlags(picked[0], { sectionId });
-      await actions.send(picked[0], text);
+      await actions.send(picked[0], text, sendMode(roster.prefs));
       actions.openSession(picked[0]);
       close();
       return;
     }
     const room2 = await actions.createRoom(picked, sectionId ? { sectionId } : {});
-    await actions.send(room2.id, text);
+    await actions.send(room2.id, text, sendMode(roster.prefs));
     actions.openSession(room2.id);
     close();
   });
@@ -29076,7 +29091,7 @@ function apply(ctx) {
       if (typeof release === "function") release();
       if (snapshot.ready) {
         try {
-          localStorage.setItem(PREFS_KEY, JSON.stringify({ theme: prefs.theme, accent: prefs.accent, motion: prefs.motion, layout: prefs.layout, width: prefs.width, flatWidth: prefs.flatWidth, thinking: prefs.thinking, defaultBotModel: prefs.defaultBotModel, enterToSend: prefs.enterToSend }));
+          localStorage.setItem(PREFS_KEY, JSON.stringify({ theme: prefs.theme, accent: prefs.accent, motion: prefs.motion, layout: prefs.layout, width: prefs.width, flatWidth: prefs.flatWidth, thinking: prefs.thinking, defaultBotModel: prefs.defaultBotModel, enterToSend: prefs.enterToSend, steerWhileBusy: prefs.steerWhileBusy }));
         } catch {
         }
       }

@@ -626,6 +626,8 @@ const ZH = {
   'Text width': '正文宽度',
   'Show thinking': '显示思考过程',
   'Enter sends message': '回车发送消息',
+  'Steer while a Bot is busy (cuts its current step)': 'Bot 忙碌时插话发送（会打断它当前这一步）',
+  'Off, a message sent meanwhile waits for the next turn.': '关闭时，这期间发出的消息等下一轮再读',
   'Bring up related memory': '自动带上相关记忆',
   'Group memory size': '群记忆容量',
   'Bot memory size': 'Bot 记忆容量',

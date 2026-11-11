@@ -154,7 +154,11 @@ function GeneralPage({ roster, actions, run, dsh }) {
         prefs.defaultBotModel ? h('button', { type: 'button', className: 'bt-soft bt-soft-sm', onClick: () => run(actions.setPrefs({ defaultBotModel: null })) }, t('Reset')) : null)),
     h(SetSection, { key: 'input', title: t('Input') },
       h(SetRow, { label: t('Enter sends message') },
-        h(Switch, { label: t('Enter sends message'), on: prefs.enterToSend !== false, onChange: enterToSend => run(actions.setPrefs({ enterToSend })) }))),
+        h(Switch, { label: t('Enter sends message'), on: prefs.enterToSend !== false, onChange: enterToSend => run(actions.setPrefs({ enterToSend })) })),
+      // Steer cuts the model call a Bot is running, so the cost is on the label: a
+      // user who reads it as plain queueing loses a turn of tokens every time.
+      h(SetRow, { label: t('Steer while a Bot is busy (cuts its current step)'), hint: t('Off, a message sent meanwhile waits for the next turn.') },
+        h(Switch, { label: t('Steer while a Bot is busy (cuts its current step)'), on: prefs.steerWhileBusy === true, onChange: steerWhileBusy => run(actions.setPrefs({ steerWhileBusy })) }))),
     h(SetSection, { key: 'memory', title: t('Memory') },
       h(SetRow, { label: t('Bring up related memory') },
         h(Switch, { label: t('Bring up related memory'), on: prefs.memoryAutoRecall !== false, onChange: memoryAutoRecall => run(actions.setPrefs({ memoryAutoRecall })) })),

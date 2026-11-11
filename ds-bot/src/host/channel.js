@@ -188,6 +188,14 @@ export function install(rt) {
       if (body.enterToSend === false) state.prefs.enterToSend = false
       else if (body.enterToSend === true || body.enterToSend === null) delete state.prefs.enterToSend
     }
+    // Whether a message the user sends while a Bot is busy cuts its model call
+    // (`steer`) or waits for the next turn (`queue`, the default). Only a strict
+    // boolean counts: `"false"` is a caller bug, and reading it as `false` would let
+    // a type mistake silently hold a preference the user set.
+    if (body.steerWhileBusy !== undefined) {
+      if (body.steerWhileBusy === true) state.prefs.steerWhileBusy = true
+      else if (body.steerWhileBusy === false || body.steerWhileBusy === null) delete state.prefs.steerWhileBusy
+    }
     if (body.memoryAutoRecall !== undefined) {
       if (body.memoryAutoRecall === false) state.prefs.memoryAutoRecall = false
       else delete state.prefs.memoryAutoRecall

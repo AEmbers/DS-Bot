@@ -7,6 +7,7 @@ import { CreateBot } from './create-bot.js'
 import { QUICK_EDGES, useFlip, useGlide, useMorph } from './motion.js'
 import { t } from './i18n.js'
 import { sendsOnEnter } from './enter-key.js'
+import { sendMode } from './send-mode.js'
 
 export function NewChat({ mode, sectionId = null, paneLeft, roster, actions }) {
   const [query, setQuery] = useState('')
@@ -52,7 +53,7 @@ export function NewChat({ mode, sectionId = null, paneLeft, roster, actions }) {
     if (bot.hidden || (sectionId && bot.sectionId !== sectionId)) {
       await actions.setFlags(bot.id, { ...(bot.hidden ? { hidden: false } : {}), ...(sectionId ? { sectionId } : {}) })
     }
-    if (message.trim()) await actions.send(bot.id, message.trim())
+    if (message.trim()) await actions.send(bot.id, message.trim(), sendMode(roster.prefs))
     actions.openSession(bot.id)
     close()
   })
@@ -74,7 +75,7 @@ export function NewChat({ mode, sectionId = null, paneLeft, roster, actions }) {
     if (admin === null || picked.length === 0) return
     const text = message.trim()
     const room = await actions.createRoom([admin, ...picked], { admin, ...(sectionId ? { sectionId } : {}), ...(text ? {} : { greet: true }) })
-    if (text) await actions.send(room.id, text)
+    if (text) await actions.send(room.id, text, sendMode(roster.prefs))
     actions.openSession(room.id)
     close()
   }
@@ -85,13 +86,13 @@ export function NewChat({ mode, sectionId = null, paneLeft, roster, actions }) {
     if (text === '' || picked.length === 0) return
     if (picked.length === 1) {
       if (sectionId) await actions.setFlags(picked[0], { sectionId })
-      await actions.send(picked[0], text)
+      await actions.send(picked[0], text, sendMode(roster.prefs))
       actions.openSession(picked[0])
       close()
       return
     }
     const room = await actions.createRoom(picked, sectionId ? { sectionId } : {})
-    await actions.send(room.id, text)
+    await actions.send(room.id, text, sendMode(roster.prefs))
     actions.openSession(room.id)
     close()
   })
